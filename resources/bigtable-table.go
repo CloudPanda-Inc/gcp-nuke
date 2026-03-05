@@ -2,6 +2,7 @@ package resources
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/sirupsen/logrus"
 
@@ -9,6 +10,7 @@ import (
 
 	"github.com/ekristen/libnuke/pkg/registry"
 	"github.com/ekristen/libnuke/pkg/resource"
+	"github.com/ekristen/libnuke/pkg/settings"
 	"github.com/ekristen/libnuke/pkg/types"
 
 	"github.com/ekristen/gcp-nuke/pkg/nuke"
@@ -22,6 +24,9 @@ func init() {
 		Scope:    nuke.Project,
 		Resource: &BigtableTable{},
 		Lister:   &BigtableTableLister{},
+		Settings: []string{
+			"DisableDeletionProtection",
+		},
 	})
 }
 
@@ -86,13 +91,34 @@ func (l *BigtableTableLister) List(ctx context.Context, o interface{}) ([]resour
 
 type BigtableTable struct {
 	svc      *bigtable.AdminClient
+	settings *settings.Setting
 	project  *string
 	Instance string
 	Name     string
 }
 
 func (r *BigtableTable) Remove(ctx context.Context) error {
+	if err := r.disableDeletionProtection(ctx); err != nil {
+		return err
+	}
+
 	return r.svc.DeleteTable(ctx, r.Name)
+}
+
+func (r *BigtableTable) Settings(setting *settings.Setting) {
+	r.settings = setting
+}
+
+func (r *BigtableTable) disableDeletionProtection(ctx context.Context) error {
+	if r.settings == nil || !r.settings.GetBool("DisableDeletionProtection") {
+		return nil
+	}
+
+	if err := r.svc.UpdateTableWithDeletionProtection(ctx, r.Name, bigtable.Unprotected); err != nil {
+		return fmt.Errorf("unable to disable deletion protection: %w", err)
+	}
+
+	return nil
 }
 
 func (r *BigtableTable) Properties() types.Properties {

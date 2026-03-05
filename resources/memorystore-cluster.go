@@ -16,9 +16,12 @@ import (
 	liberror "github.com/ekristen/libnuke/pkg/errors"
 	"github.com/ekristen/libnuke/pkg/registry"
 	"github.com/ekristen/libnuke/pkg/resource"
+	"github.com/ekristen/libnuke/pkg/settings"
 	"github.com/ekristen/libnuke/pkg/types"
 
 	"github.com/ekristen/gcp-nuke/pkg/nuke"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 )
 
 const MemorystoreClusterResource = "MemorystoreCluster"
@@ -29,6 +32,9 @@ func init() {
 		Scope:    nuke.Project,
 		Resource: &MemorystoreCluster{},
 		Lister:   &MemorystoreClusterLister{},
+		Settings: []string{
+			"DisableDeletionProtection",
+		},
 	})
 }
 
@@ -91,6 +97,7 @@ func (l *MemorystoreClusterLister) Close() {
 
 type MemorystoreCluster struct {
 	svc        *cluster.CloudRedisClusterClient
+	settings   *settings.Setting
 	removeOp   *cluster.DeleteClusterOperation
 	project    *string
 	region     *string
@@ -101,10 +108,41 @@ type MemorystoreCluster struct {
 }
 
 func (r *MemorystoreCluster) Remove(ctx context.Context) (err error) {
+	if err := r.disableDeletionProtection(ctx); err != nil {
+		return err
+	}
+
 	r.removeOp, err = r.svc.DeleteCluster(ctx, &clusterpb.DeleteClusterRequest{
 		Name: *r.FullName,
 	})
 	return err
+}
+
+func (r *MemorystoreCluster) Settings(setting *settings.Setting) {
+	r.settings = setting
+}
+
+func (r *MemorystoreCluster) disableDeletionProtection(ctx context.Context) error {
+	if r.settings == nil || !r.settings.GetBool("DisableDeletionProtection") {
+		return nil
+	}
+
+	op, err := r.svc.UpdateCluster(ctx, &clusterpb.UpdateClusterRequest{
+		Cluster: &clusterpb.Cluster{
+			Name:                      *r.FullName,
+			DeletionProtectionEnabled: proto.Bool(false),
+		},
+		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"deletion_protection_enabled"}},
+	})
+	if err != nil {
+		return fmt.Errorf("unable to disable deletion protection: %w", err)
+	}
+
+	if _, err = op.Wait(ctx); err != nil {
+		return fmt.Errorf("unable to wait for deletion protection update operation: %w", err)
+	}
+
+	return nil
 }
 
 func (r *MemorystoreCluster) Properties() types.Properties {

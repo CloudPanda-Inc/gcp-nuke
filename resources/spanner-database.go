@@ -3,6 +3,7 @@ package resources
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/gotidy/ptr"
@@ -16,9 +17,11 @@ import (
 
 	"github.com/ekristen/libnuke/pkg/registry"
 	"github.com/ekristen/libnuke/pkg/resource"
+	"github.com/ekristen/libnuke/pkg/settings"
 	"github.com/ekristen/libnuke/pkg/types"
 
 	"github.com/ekristen/gcp-nuke/pkg/nuke"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 )
 
 const SpannerDatabaseResource = "SpannerDatabase"
@@ -29,6 +32,9 @@ func init() {
 		Scope:    nuke.Project,
 		Resource: &SpannerDatabase{},
 		Lister:   &SpannerDatabaseLister{},
+		Settings: []string{
+			"DisableDeletionProtection",
+		},
 	})
 }
 
@@ -122,6 +128,7 @@ func (l *SpannerDatabaseLister) List(ctx context.Context, o interface{}) ([]reso
 
 type SpannerDatabase struct {
 	svc      *database.DatabaseAdminClient
+	settings *settings.Setting
 	Project  *string
 	FullName *string
 	Name     *string `description:"The name of the Spanner database"`
@@ -130,9 +137,42 @@ type SpannerDatabase struct {
 }
 
 func (r *SpannerDatabase) Remove(ctx context.Context) error {
+	if err := r.disableDeletionProtection(ctx); err != nil {
+		return err
+	}
+
 	return r.svc.DropDatabase(ctx, &databasepb.DropDatabaseRequest{
 		Database: *r.FullName,
 	})
+}
+
+func (r *SpannerDatabase) Settings(setting *settings.Setting) {
+	r.settings = setting
+}
+
+func (r *SpannerDatabase) disableDeletionProtection(ctx context.Context) error {
+	if r.settings == nil || !r.settings.GetBool("DisableDeletionProtection") {
+		return nil
+	}
+
+	op, err := r.svc.UpdateDatabase(ctx, &databasepb.UpdateDatabaseRequest{
+		Database: &databasepb.Database{
+			Name:                 *r.FullName,
+			EnableDropProtection: false,
+		},
+		UpdateMask: &fieldmaskpb.FieldMask{
+			Paths: []string{"enable_drop_protection"},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("unable to disable deletion protection: %w", err)
+	}
+
+	if _, err = op.Wait(ctx); err != nil {
+		return fmt.Errorf("unable to wait for deletion protection update operation: %w", err)
+	}
+
+	return nil
 }
 
 func (r *SpannerDatabase) Properties() types.Properties {
