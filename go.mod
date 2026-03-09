@@ -9,6 +9,8 @@ require (
 	cloud.google.com/go/bigquery v1.73.1
 	cloud.google.com/go/bigtable v1.42.0
 	cloud.google.com/go/certificatemanager v1.9.6
+	cloud.google.com/go/cloudbuild v1.25.0
+	cloud.google.com/go/clouddms v1.8.8
 	cloud.google.com/go/cloudtasks v1.13.7
 	cloud.google.com/go/compute v1.54.0
 	cloud.google.com/go/container v1.46.0
