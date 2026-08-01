@@ -1,0 +1,116 @@
+name: one-off release identity probe
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/one-off-release-identity.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Resolve and verify latest release asset
+        env:
+          EXPECTED_TAG: v1.13.0-cloudpanda.1
+        run: |
+          set -euo pipefail
+
+          curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            https://api.github.com/repos/CloudPanda-Inc/gcp-nuke/releases/latest \
+            -o release.json
+
+          python - <<'PY' > asset.env
+          import json
+          import os
+          import shlex
+
+          data = json.load(open('release.json', encoding='utf-8'))
+          expected_tag = os.environ['EXPECTED_TAG']
+          if data.get('draft') is not False:
+              raise SystemExit(f"latest release is draft: {data.get('draft')!r}")
+          if data.get('prerelease') is not False:
+              raise SystemExit(f"latest release is prerelease: {data.get('prerelease')!r}")
+          if data.get('tag_name') != expected_tag:
+              raise SystemExit(
+                  f"latest tag mismatch: got {data.get('tag_name')!r}, expected {expected_tag!r}"
+              )
+
+          assets = [
+              asset for asset in data.get('assets', [])
+              if asset.get('name', '').endswith('linux-amd64.tar.gz')
+          ]
+          if len(assets) != 1:
+              raise SystemExit(f"expected exactly one linux-amd64 asset, got {len(assets)}")
+
+          asset = assets[0]
+          values = {
+              'TAG': data['tag_name'],
+              'ASSET_NAME': asset['name'],
+              'ASSET_URL': asset['browser_download_url'],
+              'API_DIGEST': asset.get('digest') or '',
+              'ASSET_SIZE': str(asset.get('size') or ''),
+          }
+          for key, value in values.items():
+              print(f"{key}={shlex.quote(value)}")
+          PY
+
+          # shellcheck disable=SC1091
+          source asset.env
+          printf 'tag=%s\nasset=%s\napi_digest=%s\nsize=%s\n' \
+            "$TAG" "$ASSET_NAME" "$API_DIGEST" "$ASSET_SIZE"
+
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "$ASSET_NAME" "$ASSET_URL"
+
+          ACTUAL_SHA256="$(sha256sum "$ASSET_NAME" | awk '{print $1}')"
+          printf 'actual_sha256=%s\n' "$ACTUAL_SHA256"
+
+          if [[ -n "$API_DIGEST" ]]; then
+            EXPECTED_SHA256="${API_DIGEST#sha256:}"
+            test "$ACTUAL_SHA256" = "$EXPECTED_SHA256"
+          fi
+
+          mapfile -t ARCHIVE_PATHS < <(tar -tzf "$ASSET_NAME")
+          if [[ "${#ARCHIVE_PATHS[@]}" -ne 1 || "${ARCHIVE_PATHS[0]}" != 'gcp-nuke' ]]; then
+            printf 'unexpected archive paths:\n' >&2
+            printf '  %s\n' "${ARCHIVE_PATHS[@]}" >&2
+            exit 1
+          fi
+
+          tar -xzf "$ASSET_NAME"
+          chmod +x ./gcp-nuke
+          VERSION_OUTPUT="$(./gcp-nuke --version)"
+          printf 'version=%s\n' "$VERSION_OUTPUT"
+          grep -Fq "$EXPECTED_TAG" <<< "$VERSION_OUTPUT"
+
+          RESOURCE_TYPES_OUTPUT="$(NO_COLOR=1 TERM=dumb ./gcp-nuke resource-types)"
+          RESOURCE_TYPE_COUNT="$(awk '{print $1}' <<< "$RESOURCE_TYPES_OUTPUT" \
+            | grep -E '^[A-Z][A-Za-z0-9]+$' | sort -u | wc -l | tr -d ' ')"
+          printf 'resource_type_count=%s\n' "$RESOURCE_TYPE_COUNT"
+          test "$RESOURCE_TYPE_COUNT" -ge 91
+          for required in CloudBuildTrigger DatabaseMigrationConnectionProfile DatabaseMigrationJob; do
+            awk '{print $1}' <<< "$RESOURCE_TYPES_OUTPUT" | grep -Fxq "$required"
+          done
+
+          {
+            echo '## gcp-nuke release identity'
+            echo
+            echo "- tag: \`$TAG\`"
+            echo "- asset: \`$ASSET_NAME\`"
+            echo "- size: \`$ASSET_SIZE\` bytes"
+            echo "- GitHub API digest: \`${API_DIGEST:-not-provided}\`"
+            echo "- downloaded SHA-256: \`sha256:$ACTUAL_SHA256\`"
+            echo "- version: \`$VERSION_OUTPUT\`"
+            echo "- resource types: \`$RESOURCE_TYPE_COUNT\`"
+          } >> "$GITHUB_STEP_SUMMARY"
