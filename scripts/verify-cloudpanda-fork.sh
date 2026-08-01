@@ -24,7 +24,8 @@ resource_types_output="$($tmp_dir/gcp-nuke resource-types)"
 
 mapfile -t resource_types < <(
   printf '%s\n' "$resource_types_output" \
-    | sed -nE 's/^[[:space:]]*([A-Z][A-Za-z0-9]+)[[:space:]]*$/\1/p' \
+    | awk '{print $1}' \
+    | grep -E '^[A-Z][A-Za-z0-9]+$' \
     | sort -u
 )
 
