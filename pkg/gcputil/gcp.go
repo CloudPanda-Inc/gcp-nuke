@@ -14,9 +14,10 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 
+	authcredentials "cloud.google.com/go/auth/credentials"
 	"cloud.google.com/go/compute/apiv1"
 	"cloud.google.com/go/compute/apiv1/computepb"
-	"cloud.google.com/go/iam/credentials/apiv1"
+	iamcredentials "cloud.google.com/go/iam/credentials/apiv1"
 	"cloud.google.com/go/iam/credentials/apiv1/credentialspb"
 
 	"google.golang.org/api/cloudresourcemanager/v3"
@@ -25,6 +26,8 @@ import (
 	"google.golang.org/api/serviceusage/v1"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
+
+const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
 
 type Organization struct {
 	Name        string
@@ -77,7 +80,7 @@ func (g *GCP) GetZones(region string) []string {
 }
 
 func (g *GCP) ImpersonateServiceAccount(ctx context.Context, targetServiceAccount string) error {
-	credsClient, err := credentials.NewIamCredentialsClient(ctx)
+	credsClient, err := iamcredentials.NewIamCredentialsClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -86,7 +89,7 @@ func (g *GCP) ImpersonateServiceAccount(ctx context.Context, targetServiceAccoun
 	req := &credentialspb.GenerateAccessTokenRequest{
 		Name: fmt.Sprintf("projects/-/serviceAccounts/%s", targetServiceAccount),
 		Scope: []string{
-			"https://www.googleapis.com/auth/cloud-platform",
+			cloudPlatformScope,
 		},
 		Lifetime: &durationpb.Duration{
 			Seconds: int64(time.Hour.Seconds()), // 1 hour
@@ -134,13 +137,16 @@ func New(ctx context.Context, projectID, impersonateServiceAccount string) (*GCP
 	}
 
 	if jsonCreds := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"); jsonCreds != "" {
-		logrus.Debug("using credentials from GOOGLE_APPLICATION_CREDENTIALS_JSON")
-		creds, err := google.CredentialsFromJSON(ctx, []byte(jsonCreds),
-			"https://www.googleapis.com/auth/cloud-platform")
+		logrus.Debug("using service account credentials from GOOGLE_APPLICATION_CREDENTIALS_JSON")
+		creds, err := authcredentials.NewCredentialsFromJSON(
+			authcredentials.ServiceAccount,
+			[]byte(jsonCreds),
+			&authcredentials.DetectOptions{Scopes: []string{cloudPlatformScope}},
+		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse GOOGLE_APPLICATION_CREDENTIALS_JSON: %w", err)
+			return nil, fmt.Errorf("failed to parse GOOGLE_APPLICATION_CREDENTIALS_JSON as service account credentials: %w", err)
 		}
-		gcp.clientOptions = append(gcp.clientOptions, option.WithCredentials(creds))
+		gcp.clientOptions = append(gcp.clientOptions, option.WithAuthCredentials(creds))
 	}
 
 	if impersonateServiceAccount != "" {
